@@ -13,3 +13,5 @@ keywords = ["autoclicker", "theclicker"]
 input-linux = "0.7.1"
 clap = { version = "4.5.53", features = ["derive"] }
 nix = "0.30.1"
+rand = { version = "0.10.2", default-features = false }
+rand_distr = "0.6.0"

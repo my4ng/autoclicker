@@ -16,6 +16,7 @@ pub use device::{DeviceType, InputDevice, OutputDevice};
 use input_linux::{Key, KeyState, sys::input_event};
 
 const WAIT_KEY_RELEASE: std::time::Duration = std::time::Duration::from_millis(100);
+const JITTER_TABLE_SIZE: usize = 4096;
 
 pub struct KeyCode(u16);
 
@@ -48,8 +49,13 @@ pub struct StateNormal {
     hold: bool,
     grab: bool,
 
-    cooldown: Duration,
+    cooldown: Cooldown,
     cooldown_pr: Duration,
+}
+
+pub enum Cooldown {
+    Static(Duration),
+    Jitter(Box<[Duration; JITTER_TABLE_SIZE]>),
 }
 
 impl StateNormal {
@@ -215,7 +221,7 @@ impl StateLegacy {
             shared.beep,
             receiver,
             &shared.output,
-            self.cooldown,
+            Cooldown::Static(self.cooldown),
             self.cooldown_pr,
         );
     }
@@ -225,14 +231,14 @@ fn autoclicker(
     beep: bool,
     receiver: std::sync::mpsc::Receiver<AutoclickerState>,
     output: &OutputDevice,
-    cooldown: Duration,
+    cooldown: Cooldown,
     cooldown_pr: Duration,
 ) {
     let mut toggle = AutoclickerState::default();
     println!();
     print_active(&toggle);
 
-    loop {
+    for i in (0..JITTER_TABLE_SIZE).cycle() {
         if let Some(recv) = if toggle.left | toggle.middle | toggle.right {
             receiver.try_recv().ok()
         } else {
@@ -271,7 +277,11 @@ fn autoclicker(
         if toggle.right {
             output.send_key(Key::ButtonRight, KeyState::RELEASED);
         }
-        thread::sleep(cooldown);
+
+        match cooldown {
+            Cooldown::Static(duration) => thread::sleep(duration),
+            Cooldown::Jitter(ref durations) => thread::sleep(durations[i]),
+        };
     }
 }
 
@@ -330,10 +340,15 @@ impl TheClicker {
                 hold,
                 grab,
                 cooldown,
+                jitter,
                 cooldown_press_release,
             } => {
                 output.add_mouse_attributes(false);
                 print!("run -d{device_query:?} -c{cooldown} -C{cooldown_press_release}");
+
+                if jitter != 0 {
+                    print!(" -j{jitter}");
+                }
 
                 if let Some(bind) = left_bind {
                     print!(" -l{bind}")
@@ -366,6 +381,32 @@ impl TheClicker {
                     input.grab(true).expect("Cannot grab input device!");
                 }
 
+                let cooldown = if jitter == 0 {
+                    Cooldown::Static(Duration::from_millis(cooldown))
+                } else {
+                    use rand::SeedableRng;
+                    use rand_distr::Distribution;
+
+                    let mut cooldowns = Box::new([Duration::ZERO; JITTER_TABLE_SIZE]);
+
+                    let mean = cooldown as f64 * 1_000.0;
+                    let jitter = jitter as f64 * 1_000.0;
+
+                    let ratio = mean / jitter;
+                    let shape = ratio * ratio;
+                    let scale = jitter / ratio;
+
+                    let gamma = rand_distr::Gamma::new(shape, scale)
+                        .expect("Cannot have zero cooldown with jitter");
+                    let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
+
+                    for c in cooldowns.iter_mut() {
+                        *c = Duration::from_micros(gamma.sample(&mut rng) as u64);
+                    }
+
+                    Cooldown::Jitter(cooldowns)
+                };
+
                 output.create();
 
                 Self {
@@ -382,7 +423,7 @@ impl TheClicker {
                         lock_unlock_bind,
                         hold,
                         grab,
-                        cooldown: Duration::from_millis(cooldown),
+                        cooldown,
                         cooldown_pr: Duration::from_millis(cooldown_press_release),
                     }),
                 }
@@ -528,6 +569,7 @@ fn command_from_user_input() -> args::Command {
                 "\x1B[;32mIf your kernel permits that, you can bypass this dialog using the command args and modify the -c argument.\x1B[;39m"
             );
         }
+        let jitter = choose_usize("Choose jitter", Some(0)) as u64;
         let cooldown_press_release =
             choose_usize("Choose cooldown between press and release", Some(0)) as u64;
 
@@ -541,6 +583,7 @@ fn command_from_user_input() -> args::Command {
             grab,
             lock_unlock_bind,
             cooldown,
+            jitter,
             cooldown_press_release,
             device_query: input_device.path.to_str().unwrap().to_owned(),
         }

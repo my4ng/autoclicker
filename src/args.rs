@@ -45,6 +45,10 @@ pub enum Command {
         #[arg(short, default_value_t = 25)]
         cooldown: u64,
 
+        /// Set the jitter (std. dev.) of cooldown in milliseconds
+        #[arg(short, default_value_t = 0)]
+        jitter: u64,
+
         /// Set cooldown in milliseconds, between press and release
         #[arg(short = 'C', default_value_t = 0)]
         cooldown_press_release: u64,
